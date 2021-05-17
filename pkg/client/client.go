@@ -7,44 +7,58 @@ import (
 	"net"
 
 	"github.com/simonfuhrer/go-nbd/pkg/nbd"
+	"golang.org/x/net/proxy"
 )
+
+var DefaultDialer net.Dialer = net.Dialer{}
 
 type Client struct {
 	conn       net.Conn
+	dialer     net.Dialer
 	exportName string
 	connected  bool
 }
 
 // Create a client based on fixed newstyle negotiation.
-func New(network, addr, exportName string) (*Client, error) {
-	conn, err := net.Dial(network, addr)
+func New(network, addr, exportName string, proxydialer ...proxy.Dialer) (*Client, error) {
+	var err error
+	c := &Client{
+		exportName: exportName,
+		connected:  false,
+		dialer:     net.Dialer{},
+	}
+
+	if len(proxydialer) > 0 && proxydialer[0] != nil {
+		c.conn, err = proxydialer[0].Dial(network, addr)
+	} else {
+		c.conn, err = c.dialer.Dial(network, addr)
+	}
 	if err != nil {
 		return nil, err
 	}
-	c := &Client{
-		conn:       conn,
-		exportName: exportName,
-		connected:  false,
-	}
-
-	if err := c.pingNewStyleOrFixedNewStyle(); err != nil {
-		return nil, err
-	}
-
-	if err := c.upgradeToTlsConnection(); err != nil {
+	if err = c.pingFixedNewStyle(); err != nil {
 		return nil, err
 	}
 
 	return c, nil
 }
 
-func (c *Client) pingNewStyleOrFixedNewStyle() error {
+func (c *Client) pingFixedNewStyle() error {
 	var magic uint64
 	if err := binary.Read(c.conn, binary.BigEndian, &magic); err != nil {
 		return fmt.Errorf("read of magic errored: %v", err)
 	}
 	if magic != nbd.NBD_MAGIC {
 		return fmt.Errorf("bad magic %v", magic)
+	}
+
+	var optsMagic uint64
+	if err := binary.Read(c.conn, binary.BigEndian, &optsMagic); err != nil {
+		return fmt.Errorf("read of opts magic errored: %v", err)
+	}
+
+	if optsMagic != nbd.NBD_OPTS_MAGIC {
+		return fmt.Errorf("bad nbd_opts_magic %v", optsMagic)
 	}
 
 	var handshakeFlags uint16
@@ -61,7 +75,7 @@ func (c *Client) pingNewStyleOrFixedNewStyle() error {
 		return fmt.Errorf("could not send client flags %v", err)
 	}
 
-	return nil
+	return c.upgradeToTlsConnection()
 }
 
 func (c *Client) upgradeToTlsConnection() error {
@@ -137,7 +151,7 @@ func (c *Client) Connect() error {
 	return nil
 }
 
-func (c *Client) Read(offset, length int) ([]byte, error) {
+func (c *Client) Read(offset uint64, length uint32) ([]byte, error) {
 	data := make([]byte, length)
 	if !c.connected {
 		if err := c.Connect(); err != nil {
@@ -147,8 +161,8 @@ func (c *Client) Read(offset, length int) ([]byte, error) {
 	nbdRequest := nbd.NbdRequest{
 		NbdRequestMagic: nbd.NBD_REQUEST_MAGIC,
 		NbdCommandType:  nbd.NBD_CMD_READ,
-		NbdOffset:       uint64(offset),
-		NbdLength:       uint32(length),
+		NbdOffset:       offset,
+		NbdLength:       length,
 		NbdHandle:       0,
 		NbdCommandFlags: 0,
 	}
