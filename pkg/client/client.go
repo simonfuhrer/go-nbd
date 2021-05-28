@@ -119,6 +119,19 @@ func (c *Client) upgradeToTlsConnection() error {
 }
 
 func (c *Client) Close() error {
+	if c.connected {
+		nbdRequest := nbd.NbdRequest{
+			NbdRequestMagic: nbd.NBD_REQUEST_MAGIC,
+			NbdCommandType:  nbd.NBD_CMD_DISC,
+			NbdOffset:       0,
+			NbdLength:       0,
+			NbdHandle:       0,
+			NbdCommandFlags: 0,
+		}
+		if err := binary.Write(c.conn, binary.BigEndian, &nbdRequest); err != nil {
+			return err
+		}
+	}
 	return c.conn.Close()
 }
 
